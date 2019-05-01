@@ -655,19 +655,16 @@ Parse(nvidia::inferenceserver::InferenceServer* server, int argc, char** argv)
   }
 
   exit_on_failed_init_ = exit_on_error;
-  if (allow_http) {
-    http_status_port_ = http_status_port;
-    http_health_port_ = http_health_port;
-    http_profile_port_ = http_profile_port;
-    http_infer_port_ = http_infer_port;
-  }
 
-  if (allow_grpc) {
-    grpc_status_port_ = grpc_status_port;
-    grpc_health_port_ = grpc_health_port;
-    grpc_profile_port_ = grpc_profile_port;
-    grpc_infer_port_ = grpc_infer_port;
-  }
+  http_status_port_ = http_status_port;
+  http_health_port_ = http_health_port;
+  http_profile_port_ = http_profile_port;
+  http_infer_port_ = http_infer_port;
+
+  grpc_status_port_ = grpc_status_port;
+  grpc_health_port_ = grpc_health_port;
+  grpc_profile_port_ = grpc_profile_port;
+  grpc_infer_port_ = grpc_infer_port;
 
   metrics_port_ = allow_metrics ? metrics_port : -1;
   grpc_ports_ = {grpc_status_port_, grpc_health_port_, grpc_profile_port_,
