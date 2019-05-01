@@ -190,24 +190,6 @@ class ModelRepositoryManager {
   std::shared_ptr<ServerStatusManager> status_manager_;
 
   std::unique_ptr<BackendLifeCycle> backend_life_cycle_;
-
-  // model -> version -> state
-  // keep track of live version servable.
-  // On successful version unload, remove from version map
-  // model add / delete is another story (can have model key map to empty version map)
-  // [TODO] clean up
-  // ModelMap model_map_;
-  // model -> version -> servable
-  // in TFS, live == can't unload
-
-  // we want MRM hold servabele (shared_ptr) until it is asked to be unloaded
-  // ref_cnt == 1. When ref_cnt == 0, it just unload automatically
-  // if ask for infer, provide the shared_ptr (ref_cnt++), done (ref_cnt--)
-  // we want to know liveness, keep track of ref_cnt without holding shared_ptr
-  // mark as unloading, but truely unload when ref_cnt == 0
-  // live if we still knows the model (not all versions of the model are unavailable)
-  // queue of actions (but we don't want to redo the work: only queue load if load is not in the queue)
-  // Need to define "servable state"
 };
 
 }}  // namespace nvidia::inferenceserver

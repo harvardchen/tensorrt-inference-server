@@ -28,6 +28,7 @@
 #include "src/core/model_repository_manager.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <thread>
 #include "src/core/backend.h"
 #include "src/core/constants.h"
@@ -238,7 +239,7 @@ IsModified(const std::string& path, int64_t* last_ns)
 
 class BackendHandleImpl : public ModelRepositoryManager::BackendHandle {
  public:
-  ~BackendHandleImpl() { LOG_INFO << "unload"; OnDestroyBackend_(); LOG_INFO << "unload"; }
+  ~BackendHandleImpl() { LOG_INFO << "unload"; OnDestroyBackend_(); LOG_INFO << "unloaded"; }
   BackendHandleImpl(
       std::unique_ptr<InferenceBackend> is,
       std::function<void()> OnDestroyBackend);
@@ -531,9 +532,7 @@ ModelRepositoryManager::BackendLifeCycle::AsyncLoad(
   }
 
   if (force_unload) {
-    LOG_INFO << "Here";
     for (auto& version_backend : it->second) {
-      LOG_INFO << "Unloading: " << model_name << ":" << version_backend.first;
       bool should_unload = false;
       {
         std::lock_guard<std::mutex> lock(version_backend.second->mtx_);
@@ -545,9 +544,8 @@ ModelRepositoryManager::BackendLifeCycle::AsyncLoad(
         }
       }
       if (should_unload) {
-        LOG_INFO << "Start unload";
+        LOG_INFO << "unloading: " << model_name << ":" << version_backend.first;
         version_backend.second->handle_.reset();
-        LOG_INFO << "unloading...";
       }
     }
   }
@@ -630,11 +628,9 @@ ModelRepositoryManager::BackendLifeCycle::CreateBackendHandle(
   {
     std::lock_guard<std::mutex> lock(backend_info->mtx_);
     if (status.IsOk()) {
-      LOG_INFO << "successfully loaded '" << model_name << "' version " << version;
       backend_info->state_ = ModelReadyState::MODEL_READY;
       // [TODO] verify correctness
       // Load only happened when model unavailble or unknown, handle_ is empty
-      LOG_ERROR << "before I don't know what unload";
       backend_info->handle_.reset(new BackendHandleImpl(std::move(is),
           [this, model_name, version, backend_info]() mutable {
             LOG_INFO << "uunloadd";
@@ -645,7 +641,7 @@ ModelRepositoryManager::BackendLifeCycle::CreateBackendHandle(
             // Check if next action is requested
             this->TriggerNextAction(model_name, version, backend_info);
           }));
-      LOG_ERROR << "after I don't know what unload";
+      LOG_INFO << "successfully loaded '" << model_name << "' version " << version;
     } else {
       LOG_ERROR << "failed to load '" << model_name << "' version " << version << ": " << status.AsString();
       backend_info->state_ = ModelReadyState::MODEL_UNAVAILABLE;
@@ -1089,31 +1085,43 @@ ModelRepositoryManager::VersionsToLoad(
 {
   versions.clear();
 
+  // Get integral number of the version directory
+  const auto model_path = tensorflow::io::JoinPath(repository_path_, name);
+  std::set<std::string> subdirs;
+  RETURN_IF_ERROR(GetSubdirs(model_path, &subdirs));
+  std::set<int64_t, std::greater<int64_t>> existing_versions;
+  for (const auto& subdir : subdirs) {
+    try {
+      int64_t version = std::stoll(subdir);
+      existing_versions.insert(version);
+    } catch (const std::invalid_argument& ia) {
+      LOG_ERROR << "failed to convert version directory '" << subdir << "' to integral number";
+    }
+  }
+
   if (model_config.version_policy().has_specific()) {
     for (const auto& v : model_config.version_policy().specific().versions()) {
-      versions.push_back(v);
+      // Only load the specific versions that are presented in model directory
+      bool version_not_exist = existing_versions.insert(v).second;
+      if (!version_not_exist) {
+        versions.push_back(v);
+      } else {
+        LOG_ERROR << "version " << v << " is specified for model '" << name
+                  << "', but the version directory is not present";
+      }
     }
   } else {
-    const auto model_path = tensorflow::io::JoinPath(repository_path_, name);
-    std::set<std::string> subdirs;
-    RETURN_IF_ERROR(GetSubdirs(model_path, &subdirs));
-    
     if (model_config.version_policy().has_latest()) {
-      for (const auto& subdir : subdirs) {
-        if (versions.size() < model_config.version_policy().latest().num_versions()) {
-          versions.push_back(std::stoll(subdir));
-        } else {
-          auto it = std::min_element(versions.begin(), versions.end());
-          int64_t current = std::stoll(subdir);
-          if (*it < current) {
-            *it = current;
-          }
+      // std::set is sorted with std::greater
+      for (const auto& v : existing_versions) {
+        if (versions.size() >= model_config.version_policy().latest().num_versions()) {
+          break;
         }
+        versions.push_back(v);
       }
     } else {
-      for (const auto& subdir : subdirs) {
-        versions.push_back(std::stoll(subdir));
-      }
+      // all
+      versions.assign(existing_versions.begin(), existing_versions.end());
     }
   }
 
