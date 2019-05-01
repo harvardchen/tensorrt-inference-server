@@ -291,12 +291,18 @@ GRPCServer::Create(
         grpc_server->rpcStreamInfer_ =
             inferenceService->RegisterRPC<StreamInferContext>(
                 &GRPCService::AsyncService::RequestStreamInfer);
+        grpc_server->flags_["infer"] = true;
+      } else {
+        grpc_server->flags_["infer"] = false;
       }
 
       if (ep_name == "status") {
         LOG_INFO << "Register Status RPC";
         grpc_server->rpcStatus_ = inferenceService->RegisterRPC<StatusContext>(
             &GRPCService::AsyncService::RequestStatus);
+        grpc_server->flags_["status"] = true;
+      } else {
+        grpc_server->flags_["status"] = false;
       }
 
       if (ep_name == "profile") {
@@ -304,12 +310,18 @@ GRPCServer::Create(
         grpc_server->rpcProfile_ =
             inferenceService->RegisterRPC<ProfileContext>(
                 &GRPCService::AsyncService::RequestProfile);
+        grpc_server->flags_["profile"] = true;
+      } else {
+        grpc_server->flags_["profile"] = false;
       }
 
       if (ep_name == "health") {
         LOG_INFO << "Register Health RPC";
         grpc_server->rpcHealth_ = inferenceService->RegisterRPC<HealthContext>(
             &GRPCService::AsyncService::RequestHealth);
+        grpc_server->flags_["health"] = true;
+      } else {
+        grpc_server->flags_["health"] = false;
       }
     }
   }
@@ -327,12 +339,20 @@ GRPCServer::Start()
 
     // You can register RPC execution contexts from any registered RPC on any
     // executor.
-    executor->RegisterContexts(rpcInfer_, g_Resources, infer_thread_cnt_);
-    executor->RegisterContexts(
-        rpcStreamInfer_, g_Resources, stream_infer_thread_cnt_);
-    executor->RegisterContexts(rpcStatus_, g_Resources, 1);
-    executor->RegisterContexts(rpcHealth_, g_Resources, 1);
-    executor->RegisterContexts(rpcProfile_, g_Resources, 1);
+    if (flags_["infer"]) {
+      executor->RegisterContexts(rpcInfer_, g_Resources, infer_thread_cnt_);
+      executor->RegisterContexts(
+          rpcStreamInfer_, g_Resources, stream_infer_thread_cnt_);
+    }
+
+    if (flags_["status"])
+      executor->RegisterContexts(rpcStatus_, g_Resources, 1);
+
+    if (flags_["profile"])
+      executor->RegisterContexts(rpcProfile_, g_Resources, 1);
+
+    if (flags_["health"])
+      executor->RegisterContexts(rpcHealth_, g_Resources, 1);
 
     AsyncRun();
     return Status::Success;

@@ -60,6 +60,7 @@ class GRPCServer : private nvrpc::Server {
   nvrpc::IRPC* rpcHealth_;
   int infer_thread_cnt_;
   int stream_infer_thread_cnt_;
+  std::map<std::string, bool> flags_;
   bool running_;
 };
 
