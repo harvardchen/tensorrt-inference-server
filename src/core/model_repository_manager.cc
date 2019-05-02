@@ -239,25 +239,37 @@ IsModified(const std::string& path, int64_t* last_ns)
 
 class BackendHandleImpl : public ModelRepositoryManager::BackendHandle {
  public:
-  ~BackendHandleImpl() { LOG_INFO << "unload"; OnDestroyBackend_(); LOG_INFO << "unloaded"; }
   BackendHandleImpl(
       std::unique_ptr<InferenceBackend> is,
-      std::function<void()> OnDestroyBackend);
+      std::function<void(std::unique_ptr<InferenceBackend>)> OnDestroyBackend);
+
+  ~BackendHandleImpl();
+
   InferenceBackend* GetInferenceBackend() override { return is_.get(); }
 
  private:
   std::unique_ptr<InferenceBackend> is_;
 
   // Use to inform the BackendLifeCycle that the backend handle is destroyed
-  std::function<void()> OnDestroyBackend_;
+  std::function<void(std::unique_ptr<InferenceBackend>)> OnDestroyBackend_;
 };
 
 BackendHandleImpl::BackendHandleImpl(
     std::unique_ptr<InferenceBackend> is,
-    std::function<void()> OnDestroyBackend)
+    std::function<void(std::unique_ptr<InferenceBackend>)> OnDestroyBackend)
   : is_(std::move(is)), 
     OnDestroyBackend_(std::move(OnDestroyBackend))
 {
+}
+
+BackendHandleImpl::~BackendHandleImpl()
+{
+  // [TODO] fix InferenceBackend destructor
+  // The expectation is that the InferenceBackend can be released when
+  // ~BackendHandleImpl() is called. But in fact, it is "ready" to be released
+  // if it just finished a request
+  // is_.reset();
+  OnDestroyBackend_(std::move(is_));
 }
 
 }  // namespace
@@ -268,6 +280,17 @@ class ModelRepositoryManager::BackendLifeCycle {
       const PlatformConfigMap& platform_map,
       const std::string& repository_path,
       std::unique_ptr<BackendLifeCycle>* life_cycle);
+
+  ~BackendLifeCycle()
+  {
+    {
+      std::lock_guard<std::mutex> lock(release_queue_mtx_);
+      exiting_ = true;
+    }
+    if (release_thread_.joinable()) {
+      release_thread_.join();
+    }
+  }
 
   // For now, Load() will first unload all versions of the model and then
   // load the requested versions
@@ -306,8 +329,25 @@ class ModelRepositoryManager::BackendLifeCycle {
   };
 
   BackendLifeCycle(const std::string& repository_path)
-    : repository_path_(repository_path)
+    : exiting_(false), repository_path_(repository_path)
   {
+    // [TODO] fix InferenceBackend destructor
+    release_thread_ = std::thread([this](){
+      {
+        std::vector<std::unique_ptr<InferenceBackend>> releasing_backend;
+        {
+          std::lock_guard<std::mutex> lock(this->release_queue_mtx_);
+          if (this->exiting_ && this->release_queue_.empty()) {
+            return;
+          }
+          releasing_backend.emplace_back(std::move(this->release_queue_.front()));
+          this->release_queue_.pop_front();
+        }
+        // Give some time so that the backend should be "ready" to be released
+        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+        releasing_backend.clear();
+      }
+    });
   }
 
   Status CreateBackendHandle(
@@ -322,6 +362,12 @@ class ModelRepositoryManager::BackendLifeCycle {
   using BackendMap = std::map<std::string, VersionMap>;
   BackendMap map_;
   std::mutex map_mtx_;
+
+  // [TODO] fix InferenceBackend destructor
+  bool exiting_;
+  std::thread release_thread_;
+  std::mutex release_queue_mtx_;
+  std::deque<std::unique_ptr<InferenceBackend>> release_queue_;
 
   const std::string& repository_path_;
   std::unique_ptr<NetDefBackendFactory> netdef_factory_;
@@ -570,6 +616,7 @@ ModelRepositoryManager::BackendLifeCycle::AsyncLoad(
       } else {
         // [TODO] clean up the logic here
         vit->second->next_action_ = ActionType::NO_ACTION;
+        vit->second->state_ = ModelReadyState::MODEL_LOADING;
         std::thread worker(&ModelRepositoryManager::BackendLifeCycle::CreateBackendHandle, this, model_name, version, vit->second.get());
         worker.detach();
       }
@@ -632,14 +679,19 @@ ModelRepositoryManager::BackendLifeCycle::CreateBackendHandle(
       // [TODO] verify correctness
       // Load only happened when model unavailble or unknown, handle_ is empty
       backend_info->handle_.reset(new BackendHandleImpl(std::move(is),
-          [this, model_name, version, backend_info]() mutable {
-            LOG_INFO << "uunloadd";
+          [this, model_name, version, backend_info](std::unique_ptr<InferenceBackend> is) mutable {
             {
               std::lock_guard<std::mutex> lock(backend_info->mtx_);
               backend_info->state_ = ModelReadyState::MODEL_UNAVAILABLE;
             }
             // Check if next action is requested
             this->TriggerNextAction(model_name, version, backend_info);
+
+            // [TODO] fix InferenceBackend destructor
+            {
+              std::lock_guard<std::mutex> lock(this->release_queue_mtx_);
+              this->release_queue_.emplace_back(std::move(is));
+            }
           }));
       LOG_INFO << "successfully loaded '" << model_name << "' version " << version;
     } else {
@@ -705,7 +757,9 @@ ModelRepositoryManager::BackendLifeCycle::TriggerNextAction(
         break;
     }
   }
+  LOG_INFO << "near the end";
   if (should_unload) {
+    LOG_ERROR << "Should unload?";
     backend_info->handle_.reset();
   }
   return Status::Success;
@@ -745,6 +799,10 @@ ModelRepositoryManager::Create(
         RequestStatusCode::ALREADY_EXISTS,
         "ModelRepositoryManager singleton already created");
   }
+
+  // The rest only matters if repository path is valid directory
+  RETURN_IF_TF_ERROR(tensorflow::Env::Default()->IsDirectory(repository_path));
+
   PlatformConfigMap platform_config_map;
 
   BuildPlatformConfigMap(
